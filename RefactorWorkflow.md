@@ -1,4 +1,4 @@
-# 确定性重构工作流（v1，已吸收审查修订）
+# 确定性重构工作流（v1.1，已修复第二轮六个阻塞项）
 
 这份文档设计一套用于「未经严格审查的 Python 移植仓库」的重构机制。典型对象是按 S4 C/C++ 源码移植的 Python 版，再加上后来按零散需求打上的局部补丁。目标是在数值行为保持不变的前提下，清掉 Agent 式过度封装、缺输入却静默继续、双向依赖、重复计算，以及照搬 C 的低效双循环等问题。
 
@@ -71,11 +71,26 @@ v1 依据 `RefactorWorkflowReview.md` 修改。正文里每一处改动都用下
 | S2-5 删除测试 | 采纳 | R23 | 无 |
 | §9 三个原型 | 采纳 | R24 | 无 |
 
+## 修订说明（v1 → v1.1）
+
+v1.1 只修 `RefactorWorkflowReview.md` 第二轮的六个阻塞项（V1-S0-1 至 V1-S0-6）。第二轮的高优先级与中优先级意见本版不改。正文里用 `R26` 至 `R31` 标注；没有这些标注的段落仍是 v1。
+
+| 编号 | 位置 | 原方案（v1） | 现方案（v1.1） | 原因 | 评审项 | 处置 |
+| --- | --- | --- | --- | --- | --- | --- |
+| R26 | 3 | `proof_hash` 只含直接依赖的契约哈希，并用手工维护的 `constitution_version` | `proof_hash` 含排序后的直接依赖 `proof_hash`，以及全部权威文件自动算出的 `authority_digest`；强连通分量共用一个组证明 | 被调用方只改实现、不改契约时，调用方仍显示 `reviewed`；漏改版本号就绑不上总纲 | V1-S0-1 | 采纳评审的方案 A |
+| R27 | 3、10.1 | 一个 `source_digest` 既记录当时的全仓树，又被写成当前证明对象 | 拆成 `run_tree_digest`（只追溯，不参与状态）和 `proof_hash`（当前是否有效） | 下一步一改别的文件，全仓摘要就变，旧证明会全部失效；若因此不比较它，它又不能证明当前状态 | V1-S0-2 | 采纳 |
+| R28 | 1、9、10.2、11 | `Any`、`type: ignore`、架构债务和反模式按数量棘轮 | 按稳定 issue ID 的集合包含关系棘轮；数量只给人看 | 删掉一处、换一处加上，数量不变，门禁仍通过 | V1-S0-3 | 采纳 |
+| R29 | 4.5、5B、9、11 | 单方法类一律失败；`new_optional` 仍要求缺键抛错；上下游按 Python 参数名对接 | 单方法类只有「纯委托且无自身不变量、又没登记策略理由」才失败；可选键在边界套用默认值；跨函数按 `canonical_id` 对接 | 这三处与 v1 已有的策略对象、可选配置、`canonical_id` 互相矛盾，实现时只能任选一条 | V1-S0-4 | 采纳 |
+| R30 | 3、4.2、5A、9 | SCC 和队列直接用 static、declared、observed 的并集；dynamic 不进这张图 | 另建 `dependency_graph.json`，只有目标唯一的边才进入 SCC；已确认的 dynamic 边进入；说不清目标的边阻断相关队列 | 一条误解析会把大量函数压成一个分量；一条没进图的回调环又会让排序是错的 | V1-S0-5 | 采纳 |
+| R31 | 3、5D、10.1 | 阶段 D 的报告只引用会过期的 CI 制品 | 每步报告仍可过期；终局另存长期的 `final-attestation.json`，审计引用这个地址 | 制品过期后，审计里的哈希无法再核对 | V1-S0-6 | 采纳 |
+
 ## 1. 设计原则
 
 1. **事实与判断分开。** 符号清单、调用图、import 图、AST 反模式由脚本生成。Agent 只在脚本留出的枚举项里做判断，并把判断写成可校验的记录。
 2. **判断尽量前移到一次总纲。** 某个量是必填还是可选、某条依赖允不允许、某个函数是不是模块的公开入口，都在阶段 A 写进 schema。阶段 B 只对照 schema 改代码，不再临时决定。
-3. **棘轮。** 防御性默认、`type: ignore`、`Any`、透传包装、未登记双循环、架构债务的数量只允许下降。相对基线增加即失败。
+3. **棘轮。** 防御性默认、`type: ignore`、`Any`、透传包装、未登记双循环、架构债务只允许减少，不允许换一处加上。比较的是稳定 issue ID 的集合，不是个数。个数可以显示，不能当通过条件。
+
+> **[R28 变更｜V1-S0-3｜采纳]** 原方案（v1）：上述各项的数量不得高于基线。现方案：`current_issue_ids ⊆ baseline_issue_ids`。一个 ID 是 `sha256(rule_id + module + qualname + normalized_ast_path)`。行号不进 ID，否则一次格式化就会变成「旧问题消失、新问题出现」。同一符号内部、归一化 AST 路径不变的移动仍是同一个 ID；换到另一个符号就是新 ID，门禁失败。原因：删掉 A 处的 `type: ignore`、在 B 处加一个，数量不变，v1 的棘轮发现不了。
 4. **功能锁在外部参考上。** S4 移植的数值基准是 C 版 S4 在固定算例上的输出，不是脏 Python 自己的输出。没有 C 参考时才退化为冻结当前 Python 输出，并在总纲里写明。
 5. **一次只走一步。** 一步是任务卡列出的符号（或预先分组的原子阶段）。窗口之外的文件出现在 diff 里，任务失败。
 6. **失败即停。** 门禁非零就留在当前任务里修。需要扩大窗口时停止改代码，走修订流程，不在任务里偷偷多改。
@@ -167,7 +182,10 @@ refactor/
   golden/<case_id>.npz         ★ 外部参考输出
   adapters/                    ★ 与本仓库相关的胶水，如调用 C 版 S4 生成 golden
   inventory.json               ☆ 符号清单
-  observed_edges.json          ☆ 运行时观察到的调用边
+  observed_edges.json          ☆ 运行时观察到的调用边，只用于发现
+  dependency_graph.json        ☆ 目标已唯一解析的依赖边，供 SCC、队列和 stale 使用
+  baseline/issues.json         ★ 阶段 0 冻结的 issue ID 集合
+  state/final-attestation.json ☆ 阶段 D 的长期证明摘要，随发布物保存
   tasks/<task_id>.json         ☆ 任务卡
   contracts/<symbol_id>.json     契约
   decisions/<symbol_id>.json     非脚本判断的枚举记录
@@ -215,7 +233,7 @@ tests/structure/               调用门禁的 pytest
 | `observed` | 运行 golden、端到端和负向用例时用 `sys.setprofile` 或 `sys.monitoring` 记录 | 补 static 漏掉的多态、回调、别名 |
 | `dynamic` | `getattr`、字符串入口、注册表、`importlib`，登记在 `dynamic_ref.toml` | 不能自动删除，必须人工决定 |
 
-任务队列和 SCC 使用上述四类的并集。契约的 `callees` 必须覆盖该符号的全部 static 与 observed 出边，多出未声明的边即失败。
+这四类边只用于发现，不直接排序。`resolve_deps` 另写 `dependency_graph.json`（R30）。契约的 `callees` 必须覆盖该符号在依赖图里的全部出边。
 
 ### 状态与证明
 
@@ -232,23 +250,29 @@ tests/structure/               调用门禁的 pytest
 > **[R03 变更｜S0-3｜采纳]** 原方案：`reviewed` 只绑定符号自身的 `ast_hash`。现方案：绑定 `proof_hash`。原因：函数体不变，直接依赖的签名、契约、规范量生产者、总纲、检查器版本、夹具、环境任一变化，验收都可能失效，只比较函数体会让它们错误地保持 `reviewed`。
 
 ```text
-proof_hash = sha256(
-    primary_symbol_ast_hash
-  + 该符号契约的哈希
-  + 全部直接依赖（出边对端）的契约哈希
-  + 该符号在 canonical_vars 中的登记项
-  + constitution_version
+authority_digest = sha256(按路径排序的全部权威文件内容)
+proof_hash(symbol) = sha256(
+    symbol_ast
+  + symbol_contract
+  + authority_digest
+  + fixture_digest
+  + env.lock
   + gate_tool_sha256
-  + 该任务声明的夹具（golden、负向用例、基准算例）的哈希
-  + env.lock 哈希
+  + sorted(direct_dependency_proof_hashes)
 )
 ```
 
-任一组成项变化，`check_proof.py` 会把该符号打成 `stale`；契约变化还沿反向依赖图把直接消费者打成 `stale`；若变化的是公开契约，继续向上传播到所有消费者。队列重新插入这些符号。
+强连通分量里的符号共用一个 `group_proof_hash`。它的依赖只取离开该分量的边，因此组内互相引用不会把哈希算死循环。调用方的 `proof_hash` 引用的是这个组证明。
 
-> **[R04 变更｜S0-4｜修正后采纳]** 原方案：`mark.py` 是唯一写状态入口，事件日志用哈希链防篡改，报告引用 git 修订。现方案：事实来源改为 CI 在当前代码树上重跑全部结构门禁并重算 `proof_hash`；证明清单里的 `source_digest` 定义为「除 `refactor/state/` 之外全部受版本控制文件的路径与 blob 哈希的摘要」，因此不包含它自己；哈希链降为辅助。原因：Agent 能重写日志并重算哈希，本地状态文件没有信任价值；报告、提交、状态互相引用会循环定义。评审建议用 `git write-tree`，但该树包含证明清单，仍会循环，故改用排除自身目录的摘要。
+> **[R26 变更｜V1-S0-1｜采纳方案 A]** 原方案（v1）：`proof_hash` 只拼直接依赖的契约哈希，外加手工维护的 `constitution_version` 和该符号自己的规范量登记项。现方案：改为上面的递归式，并自动计算 `authority_digest`。`authority_digest` 覆盖 `constitution.md`、`modules.toml`、`options_schema.toml`、`canonical_vars.toml`、`chains.json`、`architecture_debt.toml`、`allowlists/*`、`tolerances.toml`、`invariants.toml`、`known_deviations.json`、`negative_cases.toml`、`api_snapshot.json`、`bench/baseline.json`、`baseline/issues.json`、`env.lock`。原因：被调用方只改函数体、不改契约文本时，v1 的调用方哈希不变，状态仍是 `reviewed`，队列不会重验它。手工版本号也会漏加。评审的方案 B（结构证明与行为证明分开）更精确，但 v1.1 先用方案 A：失效范围偏大，是保守且可复算的代价。
 
-`state/proofs/<task_id>.json` 只保存：任务 id、符号列表、`proof_hash`、`source_digest`、工具哈希、CI 制品引用。它的作用是记录「这个符号走过任务流程」，而不是「门禁当时通过了」。后者由 CI 重跑保证。
+重算 `proof_hash` 不一致就把该符号标成 `stale` 并重新入队。调用方引用了依赖的 `proof_hash`，所以被调用方的实现、契约或权威文件一变，调用方会在同一次重算里连带失效，不另做一次人工传播。
+
+> **[R04 变更｜S0-4｜修正后采纳]** 原方案：`mark.py` 是唯一写状态入口，事件日志用哈希链防篡改，报告引用 git 修订。现方案：事实来源改为 CI 在当前代码树上重跑全部结构门禁并重算 `proof_hash`；哈希链降为辅助。原因：Agent 能重写日志并重算哈希，本地状态文件没有信任价值。
+
+> **[R27 变更｜V1-S0-2｜采纳]** 原方案（v1）：证明清单里有一个 `source_digest`，定义是「除 `refactor/state/` 之外全部受版本控制文件的摘要」，既要避开自引用，又被写成当前代码树的证明。现方案：废弃这一个字段，改成两个职责不同的摘要。`run_tree_digest` 仍是当时全仓（排除 `refactor/state/`）的摘要，只写进证明清单供追溯，**不**与当前树比较，也**不**决定 `reviewed` 还是 `stale`。当前是否有效只看 `proof_hash`；它只覆盖本符号、直接依赖证明、契约、夹具、权威文件、环境和工具，也就是评审所说的 `proof_scope_digest`。原因：任务 B 改了另一个模块后，全仓摘要必然从 T1 变成 T2。若要求旧证明的全仓摘要仍等于当前树，则每走一步全部旧证明失效，流程无法收敛；若不要求相等，它又不能证明当前状态。两个职责不能共用一个字段。
+
+`state/proofs/<task_id>.json` 只保存：任务 id、符号列表、`proof_hash`、`run_tree_digest`、工具哈希、当时的每步报告引用。它记录「这个符号走过任务流程，以及当时跑在哪棵树上」。当前是否仍有效，由 CI 重算 `proof_hash` 决定。
 
 ## 4. 窗口与队列
 
@@ -276,7 +300,9 @@ proof_hash = sha256(
 
 执行顺序是这条链的**依赖序**：被调用方先验收，调用方后验收。这样规定的原因：轮到某个函数时，它调用的函数契约已经冻住，它就不能再包一层适配器去凑旧接口。
 
-> **[R06 变更｜S0-6｜采纳]** 原方案：队列脚本对调用图做拓扑排序；跨模块环阶段 A 就失败；模块内递归必须在 `chains.json` 声明，否则排序失败。现方案：`scc_groups.py` 先对 `static ∪ declared ∪ observed` 并集图求强连通分量，把分量压成单个节点后再排序。规模大于 1 的分量成为原子组，写入 `chains.json` 的 `groups`；跨模块的分量按 5A 进入 `architecture_debt.toml`。原因：相互递归、回调环、状态机互调都无法拓扑排序；而总纲禁止的边又必须靠阶段 B 才能消除，v0 的规则会两边互相等待。
+> **[R06 变更｜S0-6｜采纳]** 原方案：队列脚本对调用图做拓扑排序；跨模块环阶段 A 就失败；模块内递归必须在 `chains.json` 声明，否则排序失败。现方案：先求强连通分量，再对压缩后的图排序。规模大于 1 的分量成为原子组，写入 `chains.json` 的 `groups`；跨模块的分量按 5A 进入 `architecture_debt.toml`。原因：相互递归、回调环、状态机互调都无法拓扑排序；而总纲禁止的边又必须靠阶段 B 才能消除，v0 的规则会两边互相等待。
+
+> **[R30 变更｜V1-S0-5｜采纳]** 原方案（v1）：`scc_groups` 直接对 `static ∪ declared ∪ observed` 求强连通分量，dynamic 不进入这张图。现方案：原始调用边只用于发现。`resolve_deps` 生成 `dependency_graph.json`，SCC、队列和 stale 传播只用这张图。一条边要同时满足：目标是唯一的符号 ID；证据是已解析的 static、被 static 或 observed 印证的 declared，或总纲已确认目标的 dynamic。static 方法调用若指向不清，标 `ambiguous`，不进入 SCC，并阻断相关符号的队列，直到总纲消歧，或 observed / declared 能唯一确定目标。dynamic 一旦确认目标，也进入依赖图。declared 边允许用 static、observed 或已批准的 dynamic 印证，不要求一定有 static 或 observed，因为错误分支和延迟回调可能只有 dynamic 证据。原因：一条误解析的 static 边会把大量函数压成一个巨大分量；一条没观察到的回调环若不进图，排序仍然是错的。`trace_calls` 同时规定：新线程用 `threading.setprofile`；子进程各自写 trace 再合并；async 沿同一线程记录，但保留 task 与 scenario ID；C 扩展只记录 Python 边界，不声称看见内部调用。
 
 一个函数出现在多条链上时，第一次出现的任务拥有修改权。后面的链只重新跑契约、数值夹具和端到端用例，任务卡写成 `verify_only`，diff 必须为空。
 
@@ -292,7 +318,7 @@ proof_hash = sha256(
 | `verify_only` | 已被别的任务验收，仅重跑 | 无 | 冻结 |
 | `residual` | 阶段 C 的残留符号 | 见 5C | 冻结 |
 
-`migrate` 的调用者来自 `static ∪ declared ∪ observed`，并附带测试、示例、文档里的字符串命中作为提示。规则：
+`migrate` 的调用者来自 `dependency_graph.json` 里指向该符号的已解析入边，并附带测试、示例、文档里的字符串命中作为提示。规则：
 
 - 直接调用者超过 `modules.toml` 里的 `max_callers_for_migrate`（默认 10）时，不允许硬迁移，必须先走修订，登记一个带到期任务的 `temp_shim` 进 `architecture_debt.toml`，之后再按 `verify_only` 之外的正常任务撤除。适配层因此有登记、有期限、只减不增。
 - 主符号在 `api_snapshot.json` 里时，`migrate` 必须先有 `api_break_approved` 修订。
@@ -323,7 +349,7 @@ proof_hash = sha256(
   "numeric_effect": "preserve",
   "intent": "structure",
   "base_commit": "abc123",
-  "constitution_version": 7
+  "authority_digest": "sha256:..."
 }
 ```
 
@@ -340,7 +366,7 @@ proof_hash = sha256(
 
 > **[R10 变更｜S1-1｜采纳]** 原方案：本步禁止新增 class；模块内函数个数不得净增；注释行不得净增（均为硬门禁）。现方案：纯透传仍硬失败；新增 class/def 必须登记理由并由脚本核对；不再限制注释数量。原因：计数指标会促使把逻辑塞进大函数、误杀值对象和策略对象，还可能用删一个无关函数换新增一个包装；过度封装的本质是「没有独立职责、没有第二个调用者的透传层」，理由枚举加调用者核对更直接。
 
-> **[R18 变更｜S1-8｜修正后采纳，并行租约暂缓]** 原方案：只用 `task_started` 事件防止同一工作区同时开两张卡。现方案：明确 v1 是单 Agent 串行工作流；任务卡带 `base_commit` 与 `constitution_version`，过期即拒发；合并队列在最新目标分支上重跑 `gate --all`。原因：不同分支各持一张卡合并后，调用图和契约可能已变。并行需要服务端符号租约，v1 不做，见文末暂缓清单。
+> **[R18 变更｜S1-8｜修正后采纳，并行租约暂缓]** 原方案：只用 `task_started` 事件防止同一工作区同时开两张卡。现方案：明确 v1 是单 Agent 串行工作流；任务卡带 `base_commit` 与当时的权威文件摘要，过期即拒发；合并队列在最新目标分支上重跑 `gate --all`。原因：不同分支各持一张卡合并后，调用图和契约可能已变。并行需要服务端符号租约，v1 不做，见文末暂缓清单。v1.1 起，这个摘要就是 R26 的 `authority_digest`，不再用手写的 `constitution_version`。
 
 「不用改」也要过门禁。结论枚举只能是 `already_conforms`。脚本仍会扫这个函数的 P2、P5、P6。扫干净才允许在没有 diff 的情况下标 `reviewed`。
 
@@ -379,7 +405,8 @@ proof_hash = sha256(
 - `inventory`：符号清单。
 - `import_graph`：import 边、环、函数内 import、`importlib` 动态导入。
 - `call_graph`：static 边。
-- `trace_calls`：运行 golden、端到端和负向用例，写 `observed_edges.json`。
+- `trace_calls`：运行 golden、端到端和负向用例，写 `observed_edges.json`。跟踪范围见 R30。
+- `resolve_deps`：把已唯一解析的边写成 `dependency_graph.json`。存在 `ambiguous` 边时，阶段 A 不能结束。
 - `propose_modules`：按目录和调用紧密度给一个**建议**划分。建议不是总纲。
 
 **A3 总纲与债务。** Agent 使用 skill `refactor-constitution`，把建议收成权威文件。
@@ -414,7 +441,7 @@ sampling 与求解器之间没有边
 
 > **[R08 变更｜S0-7｜修正后采纳]** 原方案：无负向用例。评审建议：在阶段 0 冻结当前负向行为。现方案：负向用例由 schema 和契约**规定**，在阶段 A 写成 `negative_cases.toml`，不从现有代码的行为反推。原因：现有代码在缺输入时静默继续，正是要消除的 P2；冻结它就把缺陷固化了。
 
-**A4 分组与链。** `scc_groups.py` 输出强连通分量；`build_chains.py` 从入口和并集图生成 `chains.json` 初稿。Agent 只做两件事：给链命名，确认或拆分原子组。脚本拒绝未覆盖的可达入口。
+**A4 分组与链。** `scc_groups` 对 `dependency_graph.json` 求强连通分量；`build_chains` 从入口和这张依赖图生成 `chains.json` 初稿。Agent 只做两件事：给链命名，确认或拆分原子组。脚本拒绝未覆盖的可达入口。
 
 S4 移植的链按这个依赖序执行：
 
@@ -477,15 +504,17 @@ S4 移植的链按这个依赖序执行：
 
 - 契约符合 schema，`dims`、`shape`、`preconditions` 只使用受限表达式。
 - 必填输入在签名里没有默认值，函数体对必填输入不使用 `.get` / `getattr` 默认值 / `or` 默认值。
-- `callees` 覆盖该符号全部 static 与 observed 出边，且对端契约已是 `reviewed`。
-- 输出名字与下游契约的输入名字能对上；对不上就失败，而不是在本函数里再算一遍下游要的量。
+- `callees` 覆盖该符号在 `dependency_graph.json` 里的全部出边，且对端契约已是 `reviewed`。
+- 跨函数传递的数据按 `canonical_id`、dtype、shape、unit，以及生产者与消费者符号对接。对不上就失败，而不是在本函数里再算一遍下游要的量。Python 参数名只供人读，改名本身不失败。
+
+> **[R29 变更｜V1-S0-4｜采纳]** 原方案（v1）在这里要求「输出名字与下游契约的输入名字能对上」。现方案：按 `canonical_id` 对接。原因：v1 已经用 `canonical_id` 表示跨函数的数据身份，再要求局部参数名一致，会把无害的改名判成失败，也和「名字不是身份」矛盾。同一次修订还改了下面两处：单方法类的判定，以及 `new_optional` 的语义。
 - `canonical_id` 的载体只在登记的生产者里构造。
 - 核心模块的公开函数没有裸 `dict` / `Mapping[str, Any]` / `**kwargs` 形参。
 - `raises` 里每一项的 `test` 引用真实存在的测试。
 
 **运行时契约代理**（测试期）由检查器提供的 pytest 插件通过导入钩子注入，不需要在生产代码里加装饰器：入口和出口按 `dims` 求值形状与 dtype；对 `mutates` 之外的输入数组在调用前后比较哈希，发生变化即失败。
 
-本步同时跑第 9 节的局部反模式脚本，范围是任务卡里的文件，外加棘轮：全仓库计数不得高于 `baseline.json`。
+本步同时跑第 9 节的局部反模式脚本，范围是任务卡里的文件，外加集合棘轮：当前 issue ID 集合必须是 `baseline/issues.json` 的子集（R28）。个数可以写进报告，不能单独决定通过或失败。
 
 本步还要通过：
 
@@ -536,7 +565,9 @@ S4 移植的链按这个依赖序执行：
 - 全部 golden 算例在容差内或已知偏差上限内；全部物理不变量成立；**全部负向用例通过**。
 - **`api_snapshot.json` 逐项一致，或每处差异都有 `api_break_approved` 修订。**
 - **固定 runner 上的基准无回退，峰值内存无回退。**
-- `audit.md` 的每一节第一行是 `report: <制品引用> sha256: <哈希>`。`check_audit_report.py` 重新计算报告哈希。对不上则阶段 D 失败。Agent 不能用「已全局看过」代替这一行。
+- `audit.md` 的每一节第一行是 `attestation: <长期地址> sha256: <哈希>`。`check_audit_report` 重新计算 `final-attestation.json` 的哈希。对不上则阶段 D 失败。Agent 不能用「已全局看过」代替这一行。
+
+> **[R31 变更｜V1-S0-6｜采纳]** 原方案（v1）：这一行引用每步或终局的 CI 制品。现方案：每步详细报告仍放短期 CI 制品，允许过期。阶段 D 另写一份 `final-attestation.json`，内容是工具哈希、环境哈希、`authority_digest`、代码提交、`run_tree_digest`、各门禁摘要，以及详细报告的 SHA256。团队档由 CI 身份签名，存到 release 或不可变对象存储。单人本地档把这份摘要和报告压缩包的 SHA256 放进 release，仓库里保留 `refactor/state/final-attestation.json`，不保留本机路径。`audit.md` 只引用这个长期地址。原因：普通 CI 制品会过期，过期后审计里的哈希无法再核对，终局「全部通过」就只剩一串无法验证的摘要。
 
 阶段 D 的 Agent 技能 `refactor-global-audit` 只做三件脚本做不到的事，而且每件都要落成枚举记录：抽查豁免名单里每一项理由是否仍匹配代码；确认没有两条链用不同公式算同一个 `canonical_id`；确认缓存失效列表覆盖「改几何、改材料、改频率、改 G」。做完必须再跑一次 `gate --all`。两次报告哈希都写进 `audit.md`。
 
@@ -555,7 +586,7 @@ S4 移植的链按这个依赖序执行：
 | 动态引用是不是入口 | 阶段 C | `decisions/*.json` | 理由不在枚举里失败；引用的行号对不上失败 |
 | 重复簇合并还是独立 | 阶段 C | `decisions/*.json` | `independent` 缺证据失败 |
 | 数值变化是修 bug 还是改坏了 | 修订 | 任务卡 `numeric_effect` | 未标记 `bugfix` 的数值漂移失败 |
-| 现存非法依赖何时消除 | 阶段 A | `architecture_debt.toml` | 新增债务失败，数量不得上升 |
+| 现存非法依赖何时消除 | 阶段 A | `architecture_debt.toml` | 旧 debt ID 只能保留或删除；不能把一条边换成另一条边来保持个数不变 |
 
 `decisions/*.json` 的 `choice` 只能是脚本内置枚举。记录里必须有 `evidence`：文件路径和行号。`check_decision.py` 确认这些行仍然存在，并且与 choice 对应的结构还在（例如 choice 是 `delete` 时符号已不在 AST 里）。它不评价物理论证。
 
@@ -629,18 +660,19 @@ Command 是短入口，本身不做判断，只调用检查器并指出必须使
 | `trace_calls` 新增 | 运行 golden、端到端、负向用例，生成 `observed_edges.json` | 阶段 A、阶段 C、阶段 D |
 | `propose_modules` | 只产出建议，退出码始终 0 | 阶段 A 之前 |
 | `module_metrics` 新增 | 模块内调用占比、跨模块边数、public API 面积、扇入；只出报告 | 阶段 A、阶段 D |
-| `scc_groups` 新增 | 对并集调用图求强连通分量 | 阶段 A、队列 |
+| `resolve_deps` 新增 | 由发现边生成 `dependency_graph.json`；`ambiguous` 边阻断相关队列 | 阶段 A、每步、阶段 D |
+| `scc_groups` 新增 | 只对 `dependency_graph.json` 求强连通分量 | 阶段 A、队列 |
 | `build_chains` | 入口覆盖、组不与依赖序矛盾 | 阶段 A |
 | `check_chain_coverage` 新增 | 每条链被 golden 与负向用例覆盖 | 阶段 A、阶段 D |
 | `queue` ▲ | 对压缩后的图做拓扑序，生成任务卡 | `/refactor-next` |
 | `check_constitution` ▲ | 阶段 A 的结束条件 | 阶段 A |
 | `check_authority_commits` 新增 | 遍历 `base..HEAD`：改动权威文件的提交不得同时改业务代码，且必须带 `Refactor-Amend: <id>` 并有对应记录；`tool.lock` 变更同样受限 | 每步、阶段 D、CI |
-| `check_debt` 新增 | 非法依赖 ⊆ `architecture_debt.toml`；数量不得高于上一个权威提交；新增只允许出现在阶段 A 的修订里 | 每步、阶段 D |
+| `check_debt` 新增 | 非法依赖 ⊆ `architecture_debt.toml`。比较的是 debt ID 集合：旧 ID 只能保留或删除，不能替换端点；允许改的只有撤除任务和说明。严重度不能降低，除非修订给出证据。新增只允许出现在阶段 A 的修订里 | 每步、阶段 D |
 | `check_scope` ▲ | diff 路径 ⊆ 任务卡；业务文件的变化落在任务符号节点内 | 每步 |
 | `check_callsite` ▲ | 调用点文件只有调用表达式变化；`migrate` 时核对调用者列表完整 | 每步 |
 | `check_defensive` | P2、P6、P7、P8：`.get` 默认、`getattr` 默认、`or` 默认、裸 except、except 后 return/pass、链上签名默认值、内部 `**kwargs` | 每步和终局 |
 | `check_core_params` 新增 | 核心模块公开函数没有裸 `dict` / `Mapping[str, Any]` / `**kwargs` 形参 | 每步和终局 |
-| `check_wrappers` | 纯透传：函数体只有一条 return 调用，或类除 `__init__` 外只有一个方法；不在 `public_api` 即失败 | 每步和终局 |
+| `check_wrappers` | 函数体只有一条、不做转换的转发调用：不在 `public_api` 即失败。类除 `__init__` 外只有一个方法时只出候选；仅当这个方法也是纯委托、类没有自己的不变量或资源生命周期，且任务卡没有登记 `backend_strategy` 或 `test_seam` 时才失败 | 每步和终局 |
 | `check_abstraction` ▲ | 本步 diff 新增的每个 class/def 都在任务卡 `abstractions` 里有理由；`shared_invariant` 要求仓库内至少两处调用；不统计数量，不统计注释 | 每步 |
 | `check_loops` ▲ | 候选发现：嵌套 `range` 循环且循环体是下标算术、`np.vectorize`、逐行 `apply`、嵌套推导式、`append` 热循环。豁免理由枚举：`geometry_traversal`、`sparse_assembly`、`mode_pairing`。`fmm` 与 `rcwa` 不得使用 `geometry_traversal` | 每步和终局 |
 | `check_contract` ▲ | 第 5 节阶段 B 的静态契约规则 | 每步和终局 |
@@ -649,7 +681,8 @@ Command 是短入口，本身不做判断，只调用检查器并指出必须使
 | `check_invariants` 新增 | 物理不变量成立 | 每步相关夹具，终局全量 |
 | `check_dupes` ▲ | 归一化 AST 哈希聚类，只产出候选 | 阶段 C、阶段 D |
 | `check_globals` | 可变默认参数、模块级可变容器、`print`、`breakpoint` | 每步和终局 |
-| `check_typing` | `Any` 与 `type: ignore` 计数相对基线 | 每步棘轮 |
+| `check_issue_set` 新增 | 当前 issue ID 集合必须是 `baseline/issues.json` 的子集。覆盖 `Any`、`type: ignore`、防御性默认、未登记循环和架构债务 | 每步、阶段 D |
+| `check_typing` | 产出 `Any` 与 `type: ignore` 的 issue ID；个数只写进报告 | 每步、阶段 D |
 | `check_diff_coverage` 新增 | 任务符号中新增或修改的行分支覆盖 100%；声明的调用边被观察到 | 每步 |
 | `check_api_snapshot` 新增 | 与 `api_snapshot.json` 逐项比较 | 每步涉及 `public_api` 时、阶段 D |
 | `bench_check` 新增 | 固定 runner 上的中位数、MAD、峰值内存；非固定 runner 只出报告 | 每步相关基准、阶段 D |
@@ -661,13 +694,14 @@ Command 是短入口，本身不做判断，只调用检查器并指出必须使
 | `capture_golden` | 生成 golden（通过 `adapters/` 调用参考实现） | 阶段 0 |
 | `check` ▲ | 串联本步需要的上述检查 | `/refactor-step` |
 | `gate` | `--step` 或 `--all` | 每步与阶段 D |
-| `mark` ▲ | 写小型证明清单（含 `proof_hash`、`source_digest`）；不是事实来源 | 每步结束 |
-| `check_audit_report` | 审计报告引用的哈希 | 阶段 D |
+| `mark` ▲ | 写小型证明清单（含 `proof_hash`、`run_tree_digest`）；不是事实来源 | 每步结束 |
+| `attest` 新增 | 写 `final-attestation.json`，并按 5D 存到长期位置 | 阶段 D |
+| `check_audit_report` | 核对审计报告引用的长期证明哈希 | 阶段 D |
 | `status` | 从证明清单与重算结果重建进度视图 | `/refactor-status` |
 
-`gate --step` 的最小集合：`inventory`、`check_proof`、`check_authority_commits`、`check_debt`、`check_scope`、`check_callsite`、`check_defensive`、`check_core_params`、`check_wrappers`、`check_abstraction`、`check_loops`、`check_contract`、`check_negative`、`check_typing`、`check_diff_coverage`、`import_graph`、`numeric_check`、`check_invariants`（后两者只跑这张卡声明的夹具），以及任务声明的 `bench_check`。
+`gate --step` 的最小集合：`inventory`、`resolve_deps`、`check_proof`、`check_authority_commits`、`check_debt`、`check_issue_set`、`check_scope`、`check_callsite`、`check_defensive`、`check_core_params`、`check_wrappers`、`check_abstraction`、`check_loops`、`check_contract`、`check_negative`、`check_typing`、`check_diff_coverage`、`import_graph`、`numeric_check`、`check_invariants`（后两者只跑这张卡声明的夹具），以及任务声明的 `bench_check`。
 
-`gate --all` 额外加入：`trace_calls`、`check_chain_coverage`、`check_dupes`、`check_globals`、`check_api_snapshot`、`residual` 必须为空、`numeric_check` 与 `check_invariants` 全量、`bench_check` 全量、`check_constitution`。
+`gate --all` 额外加入：`trace_calls`、`check_chain_coverage`、`check_dupes`、`check_globals`、`check_api_snapshot`、`residual` 必须为空、`numeric_check` 与 `check_invariants` 全量、`bench_check` 全量、`check_constitution`、`attest`。
 
 第三方代码目录在总纲 `ignore_paths` 里列出，所有 AST 检查跳过。不设默认忽略 `tests/`：测试里的 `.get` 默认值不计入 P2，但测试里复制一份生产算法会计入 `check_dupes`。
 
@@ -685,7 +719,8 @@ Command 是短入口，本身不做判断，只调用检查器并指出必须使
   "event": "task_marked",
   "task_id": "solve_patterned.fmm_closed",
   "symbol_ids": ["fmm.closed.epsilon"],
-  "source_digest": "...",
+  "run_tree_digest": "...",
+  "proof_hash": "...",
   "report_ref": "ci-artifact://...",
   "prev_sha256": "..."
 }
@@ -707,8 +742,8 @@ Command 是短入口，本身不做判断，只调用检查器并指出必须使
 | `authority_commit_violation` 新增 | 0 | 0 |
 | `unauthorized_import` | 本步不得新增 | 0 |
 | `import_cycle` | 0 | 0 |
-| `architecture_debt` 新增 | 不得高于上一个权威提交 | 0 |
-| `defensive_required` | 本步文件为 0，全库不高于基线 | 0 |
+| `architecture_debt_ids` | 旧 ID 只能保留或删除 | 空集 |
+| `defensive_required` | 本步文件为 0；全库 ID 集合 ⊆ 基线 | 空集 |
 | `core_raw_dict_param` 新增 | 本步文件为 0 | 0 |
 | `silent_except` | 0 | 0 |
 | `passthrough_illegal` | 本步为 0 | 0 |
@@ -721,8 +756,8 @@ Command 是短入口，本身不做判断，只调用检查器并指出必须使
 | `invariant_fail` 新增 | 0 | 0 |
 | `diff_branch_uncovered` 新增 | 0 | — |
 | `declared_edge_unobserved` 新增 | 0 | 0 |
-| `type_ignore_count` | ≤ 基线 | ≤ 基线 |
-| `any_count` | ≤ 基线 | ≤ 基线 |
+| `type_ignore_ids` | ⊆ 基线集合；个数只展示 | ⊆ 基线，终局可以为空 |
+| `any_ids` | ⊆ 基线集合；个数只展示 | ⊆ 基线，终局可以为空 |
 | `numeric_abs_max` | ≤ 该夹具容差或已知偏差上限 | 全部夹具 |
 | `api_break` 新增 | 0，或有 `api_break_approved` | 0，或每处有批准 |
 | `bench_regress` 新增 | 0（固定 runner） | 0 |
@@ -751,7 +786,11 @@ Command 是短入口，本身不做判断，只调用检查器并指出必须使
 2. 复制一份当前权威文件到 `refactor/amend/<id>/before/`。
 3. Agent 只改权威文件，并写 `reason`，理由枚举：`break_cycle`、`wrong_owner`、`atomic_group`、`loop_exempt`、`numeric_bugfix`、`new_optional`、**`scc_group`**、**`debt_temp_shim`**、**`tolerance_change`**、**`api_break_approved`**、**`tool_upgrade`**。
 4. 提交信息必须带 `Refactor-Amend: <id>`，提交不得同时包含 `src/` 改动；`check_authority_commits` 在每次门禁里核对。
-5. `check_constitution` 与受影响链的 `numeric_check` 必须通过。`numeric_bugfix` 只能降低已知偏差的上限，不能升高。`tolerance_change` 不得松于基线，除非同时有 `tool_upgrade` 或参考实现变更的说明。`new_optional` 要求默认值写在 schema 里，且调用点在缺键时仍会在公开 API 边界抛错；默认值不能加在内部链上。`debt_temp_shim` 必须指定撤除任务。
+5. `check_constitution` 与受影响链的 `numeric_check` 必须通过。`numeric_bugfix` 只能降低已知偏差的上限，不能升高。`tolerance_change` 不得松于基线，除非同时有 `tool_upgrade` 或参考实现变更的说明。`new_optional` 要求默认值写在 schema 里，并且只在公开 API 边界应用：缺键时套用这个默认值，再传给核心链；核心链看到的是已经存在的字段，不再处理缺键。若缺键必须报错，这个键仍是必填，不能用 `new_optional`。默认值不能加在内部链上。`debt_temp_shim` 必须指定撤除任务。
+
+> **[R29 续｜V1-S0-4｜采纳]** 原方案（v1）写的是「`new_optional` 要求缺键时仍在公开 API 边界抛错」。现方案：可选键缺省时套用已登记默认值；必须抛错的键保持必填。原因：缺键仍抛错就是必填，不是可选，两条规则不能同时成立。
+
+> **[R29 续｜V1-S0-4｜采纳]** `check_wrappers` 的现方案见第 9 节。原方案（v1）把「类除 `__init__` 外只有一个方法，且不在 `public_api`」直接判失败。现方案：这种情况只出候选；只有该方法也是纯委托、类没有自己的不变量或资源生命周期，并且没有登记 `backend_strategy` 或 `test_seam` 时才失败。原因：FFT 后端、线性求解后端通常只有一个公开方法，也不是顶层 `public_api`，v1 会把第 4.5 节允许的 `backend_strategy` 直接判死。
 6. 通过后重算 `proof_hash`，凡是依赖该决定的符号都变为 `stale`，队列在这些符号上重做。不允许「修订完就当全库已验收」。
 
 团队档里，修订还需要 `CODEOWNERS` 审批。
