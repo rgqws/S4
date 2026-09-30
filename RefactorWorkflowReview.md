@@ -476,3 +476,446 @@ Python 局部临时变量、闭包单元、动态属性、数组视图数量巨�
 7. 把 class/def 数量、注释数量、重复 AST 从硬门禁降为审查信号。
 
 做到这些后，工作流才从“规则非常详尽”变成“关键结论可复算、控制面不可由被检查者篡改、失败模式有明确退出路径”的确定性机制。
+
+---
+
+# 第二轮审查：v1 修订版
+
+审查对象：`RefactorWorkflow.md` 的 v1（提交 `089e164`）
+
+说明：本轮内容只追加在第一轮意见之后，不修改第一轮审查原文。编号使用 `V1-S0-*`、`V1-S1-*`、`V1-S2-*`，避免与第一轮编号混淆。
+
+## 11. 第二轮结论
+
+v1 对第一轮的 21 项意见逐项给出处置，并实质性修复了多数核心问题：
+
+- 控制面与业务面已分离。
+- `ast_hash` 已升级为 `proof_hash`。
+- 调用边已有可信度模型。
+- 队列已考虑强连通分量。
+- 普通实现和签名迁移已拆成不同任务。
+- 数值、API、负向行为、物理不变量、性能和内存都进入门禁。
+- 原先容易诱导错误设计的 class/def/注释计数门槛已经取消。
+
+因此，v1 已从“概念方案”进展到“可以做原型验证的规格”。但仍不宜直接铺开完整重构。当前有六项规格级阻塞问题：依赖证明仍不完整、全仓 `source_digest` 的生命周期不清、棘轮仍按数量而非问题身份、三处硬规则相互矛盾、调用图证据与 SCC 输入没有区分“确定边”和“猜测边”、最终审计制品缺少长期保存规则。
+
+建议先修完本轮 S0 项，再执行文档中的三个原型。S1 项可以在原型阶段一并验证；S2 项可在完整门禁实现前补齐。
+
+## 12. 上一轮意见的落实评估
+
+| 第一轮意见 | v1 落实情况 | 第二轮判定 |
+| --- | --- | --- |
+| S0-1 控制面隔离 | 增加团队 CI 档与单人本地档，检查器移出工作区 | 基本解决；本地档明确不防主动绕过，边界诚实 |
+| S0-2 动态调用图 | 增加 static/declared/observed/dynamic 四级证据 | 方向正确；SCC 和任务排序如何消费这些证据仍需修订 |
+| S0-3 状态只绑 AST | 改为 `proof_hash` | 部分解决；仍未绑定直接依赖的实现证明和全部权威文件 |
+| S0-4 提交与证明循环 | 增加排除证明目录的 `source_digest` | 避开自引用；但全仓摘要会随任意后续任务变化，语义尚不清 |
+| S0-5 多调用者迁移 | 增加 `implement` 与 `migrate` | 解决 |
+| S0-6 SCC 和现存非法边 | 增加 SCC、`architecture_debt.toml` | 基本解决；SCC 使用的边集合仍可能过度近似 |
+| S0-7 数值门禁 | 增加容差、不变量、等价比较、环境锁、负向用例 | 解决；本征问题比较规则仍需通过真实算例原型验证 |
+| S0-8 性能门禁 | 增加固定 runner、中位数、MAD、峰值内存 | 方向正确；测量工具和重试规则未定义 |
+| S1-1 抽象计数 | 改为透传硬失败、抽象理由枚举 | 大体解决；单方法类规则仍与策略对象矛盾 |
+| S1-2 裸 dict 与异常 | 核心边界改为带类型配置；`None` 分类 | 基本解决；`new_optional` 的修订语义仍自相矛盾 |
+| S1-3 可执行契约 | 增加测试期运行时代理 | 方向正确；代理覆盖的对象类型和受限表达式执行器未定义 |
+| S1-4 重复与唯一生产者 | 重复 AST 降级为候选；增加载体构造点与调用次数 | 部分解决；“载体只能由生产者构造”过于严格 |
+| S1-5 顶向下发现 | 阶段 A 增加端到端链发现 | 解决 |
+| S1-6 API 兼容 | 增加 API 快照 | 基本解决；导入副作用和参数相关 shape 需补规格 |
+| S1-7 覆盖 | 增加 diff 分支覆盖和边观察 | 方向正确；100% 分支覆盖需豁免模型 |
+| S1-8 并行 | v1 明确串行，任务卡带 base commit | 在 v1 范围内解决 |
+| S2-1 清单范围 | 缩小为跨函数状态 | 解决 |
+| S2-2 高内聚 | 增加 responsibility，指标降级为报告 | 解决 |
+| S2-3 环境复现 | 增加 `env.lock` | 解决 |
+| S2-4 报告体积 | 完整报告放 CI artifact | 解决短期体积问题；长期审计保存仍缺规则 |
+| S2-5 删除测试 | 增加 API、文档和发布历史核对 | 解决 |
+
+## 13. 第二轮阻塞问题
+
+### V1-S0-1：`proof_hash` 仍没有绑定直接依赖的实现证明
+
+v1 的 `proof_hash` 包含“全部直接依赖的契约哈希”，但不包含依赖函数的实现哈希或 `proof_hash`。
+
+例如：
+
+1. `pattern.fourier` 已验收。
+2. `fmm.closed.epsilon` 依赖它并完成验收。
+3. 后续任务修改 `pattern.fourier` 的实现，但保持契约文本不变。
+4. `fmm.closed.epsilon` 自身 AST 和依赖契约都没变，所以其 `proof_hash` 仍一致，状态继续是 `reviewed`。
+
+这与 v1 所说“任一组成项变化时沿反向依赖图传播 stale”并不冲突，因为被调用方实现根本不在调用方的组成项里。最终 `gate --all` 可能通过端到端测试发现问题，但中间状态已经把一个受影响调用者错误地标为有效，任务队列也不会重验它。
+
+必须改为以下二选一：
+
+**方案 A：递归依赖证明。**
+
+```text
+proof_hash(symbol) = hash(
+  symbol_ast
+  + symbol_contract
+  + authority_digest
+  + fixture_digest
+  + environment_digest
+  + sorted(direct_dependency_proof_hashes)
+)
+```
+
+被调用方的实现一变，其 proof 变化，直接调用者自动 stale，再向上传播。依赖图已压缩 SCC，因此组内函数共用一个 group proof，不会递归死循环。
+
+**方案 B：结构证明和行为证明分开。**
+
+- `structure_proof` 只绑定当前符号及契约。
+- `behavior_proof` 绑定任务夹具运行时实际经过的全部符号实现哈希。
+- 状态只有两者都有效时才是 `reviewed`。
+
+方案 B 精确度更高，但实现复杂。v1 追求确定性，建议先用方案 A；失效范围大是可接受的保守代价。
+
+此外，当前 proof 只写了 `constitution_version` 和“该符号在 canonical_vars 中的登记项”，没有自动绑定以下权威文件：
+
+- `modules.toml`
+- `options_schema.toml`
+- `chains.json`
+- `architecture_debt.toml`
+- `allowlists/*`
+- `tolerances.toml`
+- `invariants.toml`
+- `known_deviations.json`
+- `negative_cases.toml`
+- `api_snapshot.json`
+- `bench/baseline.json`
+
+手工维护 `constitution_version` 会漏增。应计算 `authority_digest = hash(全部适用权威文件内容)`，直接进入 proof，不依赖人工改版本号。
+
+### V1-S0-2：全仓 `source_digest` 会在每个后续任务后失配
+
+v1 将 `source_digest` 定义为“除 `refactor/state/` 之外全部受版本控制文件的摘要”。它避开了证明清单自引用，但带来另一个问题：
+
+- 任务 A 完成时，proof A 保存全仓摘要 T1。
+- 任务 B 修改另一模块后，全仓摘要变成 T2。
+- proof A 的 `source_digest` 必然不等于当前树。
+
+文档一处说状态由 `proof_hash` 重算决定，另一处又说 proof 清单中的 `source_digest` 用于证明代码树，审计需要报告哈希。没有明确规定旧 proof 的 `source_digest` 是否必须匹配当前树。
+
+若必须匹配，则每做一步都会让全部旧 proof 失效，流程无法收敛。若不匹配也没关系，则这个字段只是“当时运行在哪棵树上”的历史信息，不能证明当前状态。
+
+建议拆成两个字段并明确用途：
+
+- `run_tree_digest`：门禁运行时的全仓摘要，只用于追溯，不参与当前状态判定。
+- `proof_scope_digest`：当前任务可编辑符号、直接依赖 proof、契约、夹具和权威文件的摘要，参与当前状态判定。
+
+CI artifact 记录 `run_tree_digest`；`status` 只重算 `proof_scope_digest`。不要让同一个 `source_digest` 同时承担历史追溯和当前有效性两种相反职责。
+
+### V1-S0-3：多个“棘轮”仍按数量判断，可以被等量替换绕过
+
+v1 仍使用：
+
+- `type_ignore_count ≤ 基线`
+- `any_count ≤ 基线`
+- `architecture_debt` 数量不得高于上一个权威提交
+- 反模式总计不高于 baseline
+
+数量棘轮允许：
+
+- 删除 A 文件的一个 `type: ignore`，在 B 文件新增一个，数量不变。
+- 删除一个已知依赖债务，新增另一条更严重的逆向依赖，数量不变。
+- 删除一个 `.get(default)`，在当前任务外新增另一个，数量不变。
+
+因此“只允许下降”必须按**问题身份集合**而不是计数判定：
+
+```text
+current_issue_ids ⊆ baseline_issue_ids - resolved_issue_ids
+```
+
+每个 issue ID 使用稳定字段生成，例如：
+
+```text
+hash(rule_id + module + qualname + normalized_ast_path)
+```
+
+行号不能单独作为 ID，否则格式化会把所有问题变成“删除旧问题、新增新问题”。允许同一问题在符号内部小范围移动时，采用 qualname 加归一化 AST 路径；跨符号移动则视为新问题并失败。
+
+`architecture_debt.toml` 还应要求：
+
+- 旧 debt ID 只能保留或删除，不能替换。
+- 允许更新的字段只有撤除任务和说明，不能换边的端点。
+- 严重度不能降低，除非走修订并给证据。
+
+指标表可以继续显示数量，但门禁必须比较集合。
+
+### V1-S0-4：三处硬规则存在内部矛盾
+
+#### 1. 单方法类与合法策略对象冲突
+
+v1 表示“纯透传仍硬失败”，并允许新增抽象理由 `backend_strategy`。但 `check_wrappers` 仍定义为：
+
+> 函数体只有一条 return 调用，**或类除 `__init__` 外只有一个方法**；不在 `public_api` 即失败。
+
+一个合法的 FFT backend、线性求解 backend、策略对象往往恰好只有一个公开方法，也通常不是顶层 `public_api`。它会被无条件判失败，与 `backend_strategy` 理由冲突。
+
+应改成：
+
+- 函数只有一条无转换的转发调用：硬失败，除非 public boundary。
+- 类只有一个方法：只报候选。
+- 仅当这个方法也是纯委托、类没有自有不变量/资源生命周期、且未登记 `backend_strategy` / `test_seam` 时才失败。
+
+#### 2. `new_optional` 与“缺键仍抛错”冲突
+
+第 11 节仍写：
+
+> `new_optional` 要求默认值写在 schema 里，且调用点在缺键时仍会在公开 API 边界抛错。
+
+如果缺键必须抛错，它就是 required，不是 optional。optional 的正确行为应该是：
+
+- API 边界缺键时应用 schema 中唯一登记的默认值。
+- 转换成带类型配置后，核心链只看到一个已经存在的字段，不再处理“缺键”。
+- 若公开 API 为保持兼容必须对缺键报错，则不能使用 `new_optional`，而应保持 required。
+
+#### 3. 输出按名字匹配与 `canonical_id` 冲突
+
+阶段 B 仍要求“输出名字与下游契约的输入名字能对上”。但 v1 已引入 `canonical_id`，局部参数改名不应破坏契约。
+
+跨函数数据边应按下面三项匹配：
+
+- `canonical_id`
+- dtype / shape / unit
+- producer / consumer symbol
+
+局部 Python 名称只用于可读性，不应成为硬门禁。
+
+这些不是文字小问题。若不先统一，检查器实现者会在两个相互冲突的规则中任选一个，确定性反而下降。
+
+### V1-S0-5：SCC 使用的并集图混合了确定边和近似边
+
+v1 用 `static ∪ declared ∪ observed` 做 SCC 和任务队列。这比单一 AST 好，但三种边不具备同样的含义：
+
+- static 方法调用可能因类型解析不准而指向错误符号。
+- observed 只证明“这次运行发生了”，不能证明其他合法运行没有边。
+- declared 是设计声明，可能还没有被某个夹具触发。
+- dynamic 虽然单独登记，却没有进入 SCC 并集；它仍可能形成真实调用环。
+
+后果有两种：
+
+1. 一个误解析的 static 边可能把大量函数压成一个巨大 SCC，失去小任务窗口。
+2. 一个未观察到的 dynamic 回调环可能不在 SCC 里，队列仍按错误 DAG 排序。
+
+需要增加一张专用于任务排序的 `dependency_graph.json`，不要直接使用原始调用边并集：
+
+- 边必须有唯一、已解析的 symbol ID。
+- static 方法边无法唯一解析时标 `ambiguous`，不得直接进入 SCC；它阻断相关队列，直到 constitution 决策或用 observed/declared 消歧。
+- dynamic 调用一旦确认目标，也要进入 dependency graph。
+- declared 边允许用 `static`、`observed` 或已批准的 `dynamic` 证据印证。不能强制只有 static/observed，因为错误分支、插件入口和延迟回调可能只能用 dynamic 证据。
+- 原始 call graph 用于发现；dependency graph 才用于 SCC、顺序和 stale 传播。
+
+运行时跟踪还要写清：
+
+- 新线程使用 `threading.setprofile` 或等价机制。
+- 子进程单独写 trace 后合并。
+- async task 沿同一线程记录，但要保留 task/scenario ID。
+- C 扩展只记录 Python 边界，不声称看见内部调用。
+
+否则 observed 的含义会随测试运行方式变化。
+
+### V1-S0-6：CI artifact 会过期，最终审计证据不持久
+
+v1 把完整报告放 CI artifact，仓库只保存 artifact 引用和哈希。这解决了 PR 噪声，但多数 CI artifact 有保存期限。几个月后：
+
+- `audit.md` 的 URI 可能失效。
+- 无法下载原报告并核对 SHA256。
+- 最终“所有门禁通过”的证据只剩一串不可验证的哈希。
+
+建议分层保存：
+
+- 每步详细报告：短期 CI artifact，可以过期。
+- 阶段 D 最终报告：压缩为稳定的 `final-attestation.json`，包括工具哈希、环境哈希、authority digest、代码 commit、所有门禁摘要、详细制品 SHA256。
+- `final-attestation.json` 存在仓库 release、不可变制品库或长期对象存储；团队档使用 CI 身份签名。
+- 仓库里的 `audit.md` 引用长期地址，不引用普通流水线临时 artifact。
+
+单人本地档至少把最终 attestation 和报告压缩包的 SHA256 放进 release，不能只留本机路径。
+
+## 14. 第二轮高优先级问题
+
+### V1-S1-1：规范量载体“只能在生产者内构造”过于严格
+
+测试夹具、反序列化、clone、缓存恢复、类型转换都可能合理构造 `EpsilonMatrices` 或 `LayerModes`。把类构造点限制为唯一生产者会诱导所有地方绕到一个全局工厂，增加耦合。
+
+应限制的是**生产语义**而不是 Python 构造语法：
+
+- 生产调用链里，某个 `canonical_id` 只有一个 owner/producer。
+- 测试工厂、反序列化器和 clone 显式标角色，不算重新计算。
+- 从已有 canonical data 复制或恢复要写 `derivation = copy|deserialize|cache_restore`。
+- 新计算写 `derivation = compute`，只有 owner 可以使用。
+
+这可以通过载体元数据或构造工厂的枚举入口实现，但不应全局禁止类构造。
+
+### V1-S1-2：运行时契约代理只覆盖 numpy 数组变异
+
+当前设计用数组哈希检查 `mutates`，但函数可能修改：
+
+- list / dict；
+- dataclass 字段；
+- numpy view 的 base；
+- 稀疏矩阵内部数组；
+- 自定义缓存对象；
+- memmap 或设备数组。
+
+建议契约明确每种输入的 `mutation_policy`：
+
+| 策略 | 检查 |
+| --- | --- |
+| `immutable_scalar` | 不检查变异 |
+| `numpy_readonly` | 测试时设置 `writeable=False`，优先于调用前后全量哈希 |
+| `numpy_snapshot` | 对允许 view/底层库写入的情况比较内容摘要 |
+| `object_snapshot` | 用稳定序列化或字段级 snapshot |
+| `mutable_declared` | 只允许契约列出的字段变化 |
+
+形状受限表达式不能直接用 Python `eval`。检查器需要一个明确语法（整数、名称、`+ - * //`、`len`）和解释器；出现属性调用、下标读取、函数调用就拒绝。
+
+### V1-S1-3：API 快照生成需要隔离导入副作用
+
+用 `inspect` 生成 API 快照会 import 未审查仓库。模块可能在导入时：
+
+- 读环境变量；
+- 初始化线程池；
+- 加载动态库；
+- 访问 GPU；
+- 注册插件；
+- 写缓存文件。
+
+应在受控子进程中生成快照，固定环境变量、工作目录、网络策略和超时。导入失败本身是阶段 0 的阻塞错误，不能静默跳过。
+
+返回 dtype/shape 往往依赖输入，不能作为一个函数级静态字段快照。应放进按 `case_id` 区分的 API characterization：
+
+```text
+api_case = import_path + signature + input_case_id
+           -> return_type + dtype + shape + exception
+```
+
+静态 API snapshot 只保存导入路径和签名，运行行为由 case 记录。
+
+### V1-S1-4：分支覆盖 100% 缺少受控豁免
+
+“被改行分支覆盖率 100%”目标清晰，但有些分支只在：
+
+- 特定操作系统；
+- 可选 LAPACK/FFTW backend；
+- 内存分配失败；
+- 不可构造的第三方库错误；
+- `TYPE_CHECKING`
+
+下触发。没有豁免时，Agent 可能删除必要防御分支或伪造测试。
+
+建议豁免枚举：
+
+- `platform_only`
+- `optional_backend`
+- `uninjectable_external_failure`
+- `type_checking_only`
+
+每项必须引用分支 AST、对应运行矩阵或第三方错误说明。普通业务输入分支和 P2/P6 相关错误分支不得豁免。阶段 D 在 CI 矩阵合并 coverage 后再计算，避免 Linux job 单独误报 Windows 分支。
+
+### V1-S1-5：性能门槛缺少测量器和重试协议
+
+v1 有中位数、MAD、10% 和峰值内存阈值，但还需定义：
+
+- 使用 `pyperf`、`pytest-benchmark` 还是自研 runner；
+- CPU governor、亲和性、turbo、后台负载；
+- BLAS 线程数；
+- 峰值内存是 Python allocator、RSS 还是 native heap；
+- 第一次失败是否允许自动复测；
+- 两次结果冲突时如何裁决。
+
+建议固定：
+
+- wall time 用 `pyperf` 的校准和进程隔离。
+- native 峰值 RSS 用操作系统指标；Python 分配用 `tracemalloc` 只作附加报告。
+- BLAS/OpenMP 线程数写入 `env.lock`。
+- 首次越界自动重跑一次完整基准；两次任一通过不能算通过，以两次合并样本重新统计。
+- 固定 runner 升级硬件或镜像时必须走 `tool_upgrade`/基线修订，不能沿用旧基线。
+
+### V1-S1-6：`check_authority_commits` 在 squash/merge 流程下语义不稳定
+
+v1 遍历 `base..HEAD`，要求权威文件和业务文件不在同一提交。这在 PR squash merge 后会合成一个提交，目标分支上的历史不再满足规则。
+
+应明确检查范围：
+
+- PR 阶段检查 PR 内原始 commits；CI 平台提供 commit 列表。
+- 合并后的目标分支不再按 commit 粒度重查，而是核对已批准的修订 attestation。
+- 如果团队强制 squash，则权威文件修订必须单独 PR，不能只要求“同一 PR 的不同 commit”。
+- 单人本地档若依赖 commit 粒度，就不得 squash 这些提交，或在 squash 前生成长期修订证明。
+
+否则同一套规则在 PR 中通过、合并后又失败。
+
+## 15. 第二轮中优先级问题
+
+### V1-S2-1：`check_scope` 需要定义格式化和 import 重排
+
+任务只允许当前 AST 节点和必要 import 变化。运行 formatter 或 import sorter 时可能改完整文件，造成无关 diff。应规定：
+
+- 任务开始前先跑一次固定版本 formatter，保证基线已规范化。
+- 任务中只允许同一固定版本。
+- scope 检查用 AST 节点和语义 import 集合，不用行号。
+- formatter 引起的纯空白变化可以忽略，但不能借此改变其他字符串、注释或语句顺序。
+
+### V1-S2-2：动态证据和 allowlist 也应进入 proof
+
+`dynamic_ref.toml` 已在 authority 文件中，但 `observed_edges.json` 是生成物。若测试场景变化导致 observed 边变化，相关任务顺序和覆盖结论也会变化。
+
+proof 应绑定当前符号的：
+
+- resolved dependency edges；
+- 每条边的证据类型；
+- 覆盖这条边的 scenario IDs。
+
+不必绑定整个 `observed_edges.json`，否则任何无关边变化都会让全库 stale。
+
+### V1-S2-3：阶段 D 要区分“零债务”和“合法例外”
+
+`architecture_debt.toml` 阶段 D 必须为空是合理的；合法的 dynamic entry、延迟 import、循环豁免不属于债务，应只存在 allowlist。文档已经隐含区分，但建议明确：
+
+- debt 是目标架构违反项，终局必须为零。
+- allowlist 是目标架构允许、但规则扫描会误报的例外，可以非零。
+- allowlist 每项也要有 evidence 和复审条件，但不要求阶段 D 清空。
+
+否则实施者可能为了“债务清零”把真实违规移进 allowlist。
+
+### V1-S2-4：`api_break_approved` 需要迁移期而不只是批准
+
+批准 API 破坏只能说明变化有意，不能保护外部调用者。建议修订记录还必须写：
+
+- 旧 API；
+- 新 API；
+- deprecation 期或明确的 major version；
+- 迁移示例；
+- 兼容 shim 的撤除任务（如使用）；
+- 受影响的文档和示例。
+
+## 16. 第二轮建议修改清单
+
+### 在三个原型之前必须修改
+
+1. `proof_hash` 加入直接依赖 proof 和自动计算的 `authority_digest`。
+2. 把 `source_digest` 拆成历史 `run_tree_digest` 与当前 `proof_scope_digest`。
+3. 所有棘轮改成 issue ID 集合包含关系，而不是数量关系。
+4. 修正单方法类、`new_optional`、输出名称匹配这三处规则冲突。
+5. 从原始调用图中分离 `dependency_graph.json`，只有已解析目标的边进入 SCC；dynamic 确认边也进入。
+6. 定义最终 attestation 的长期保存位置和签名/哈希规则。
+
+### 在完整门禁实现之前修改
+
+7. 把 canonical data 的“唯一构造者”改成“唯一 compute owner”，给 copy/deserialize/cache restore 明确角色。
+8. 为运行时契约定义 mutation policy 和安全的受限表达式解释器。
+9. API 快照在隔离子进程生成，返回行为改成 scenario 级记录。
+10. 给 diff coverage 增加严格枚举的豁免和 CI 矩阵合并规则。
+11. 固定性能测量器、峰值内存指标和失败复测协议。
+12. 明确 squash/merge 下权威提交检查的行为。
+
+## 17. 第二轮最终意见
+
+v1 对第一轮意见的响应是有效的，不是只加文字：任务模型、信任模型、证据模型和验收范围都有实质变化。尤其是 `implement` / `migrate` 分离、SCC、负向用例不冻结错误行为、API/性能门禁，都是正确修正。
+
+但 v1 目前仍有“规则写得更强，规则之间却未完全闭合”的问题。最关键的是：
+
+- 调用方 proof 不随被调用方实现变化；
+- 全仓摘要既像历史记录又像当前有效性证明；
+- 数量棘轮仍可被等量替换绕过；
+- wrapper、optional、数据匹配各有一处语义冲突；
+- SCC 的输入图没有把确定边与近似边分开。
+
+修复第 16 节前六项后，可以开始三个原型。三个原型通过后，可以实现完整检查器；在此之前仍不建议让 Agent 开始全仓业务重构。
